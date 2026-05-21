@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:js' as js;
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 
@@ -124,10 +125,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   '🔥 إعدادات البطولة 🔥',
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.amber,
-                  ),
+                      fontSize: 28,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.amber),
                 ),
                 const SizedBox(height: 30),
                 _buildGlassCard(
@@ -220,7 +220,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     shadowColor: Colors.greenAccent.withAlpha(102),
                   ),
                   onPressed: () {
-                    SystemSound.play(SystemSoundType.click);
+                    js.context.callMethod('eval', [
+                      "if(!window.audioCtx) window.audioCtx = new (window.AudioContext || window.webkitAudioContext)();"
+                    ]);
                     widget.onStart(_selectedQuestions, _selectedTime,
                         _p1Controller.text, _p2Controller.text);
                   },
@@ -294,6 +296,9 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
   int currentQuestionIndex = 0;
   bool isLoading = true;
 
+  List<String> shuffledOptions = [];
+  int correctedCorrectIndex = 0;
+
   late List<Player> players;
   int? winningPlayerIndex;
 
@@ -304,7 +309,6 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
   late Animation<Alignment> _alignmentTop;
   late Animation<Alignment> _alignmentBottom;
 
-  // انيميشن مخصص لوامض الإجابة الصحيحة عند الصفر
   late AnimationController _blinkController;
   late Animation<double> _blinkAnimation;
 
@@ -359,11 +363,10 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
           weight: 1),
     ]).animate(_bgController);
 
-    // إعدادات وميض زر الإجابة الصحيحة
     _blinkController = AnimationController(
-        vsync: this, duration: const Duration(milliseconds: 350));
+        vsync: this, duration: const Duration(milliseconds: 300));
     _blinkAnimation =
-        Tween<double>(begin: 1.0, end: 0.2).animate(_blinkController);
+        Tween<double>(begin: 1.0, end: 0.1).animate(_blinkController);
 
     loadQuestionsFromAsset();
   }
@@ -376,19 +379,48 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  void _playClickSound() => SystemSound.play(SystemSoundType.click);
+  void _playBrowserSound(double frequency, double duration, String type) {
+    try {
+      js.context.callMethod('eval', [
+        """
+        if (window.audioCtx) {
+          var osc = window.audioCtx.createOscillator();
+          var gain = window.audioCtx.createGain();
+          osc.type = '$type';
+          osc.frequency.setValueAtTime($frequency, window.audioCtx.currentTime);
+          gain.gain.setValueAtTime(0.3, window.audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.00001, window.audioCtx.currentTime + $duration);
+          osc.connect(gain);
+          gain.connect(window.audioCtx.destination);
+          osc.start();
+          osc.stop(window.audioCtx.currentTime + $duration);
+        }
+      """
+      ]);
+    } catch (e) {
+      // تفادي التوقف المفاجئ
+    }
+  }
 
   void _playTickSound() {
-    if (_timerSeconds <= 5) {
-      SystemChannels.platform.invokeMethod('HapticFeedback.vibrate');
+    if (_timerSeconds <= 5 && _timerSeconds > 0) {
+      _playBrowserSound(900.0, 0.25, 'triangle');
+    } else if (_timerSeconds > 0) {
+      _playBrowserSound(450.0, 0.08, 'sine');
     }
   }
 
   void _playSoundFeedback(bool success) {
     if (success) {
-      HapticFeedback.vibrate();
+      _playBrowserSound(523.25, 0.12, 'sine');
+      Future.delayed(const Duration(milliseconds: 80), () {
+        _playBrowserSound(659.25, 0.12, 'sine');
+        Future.delayed(const Duration(milliseconds: 80), () {
+          _playBrowserSound(783.99, 0.35, 'sine');
+        });
+      });
     } else {
-      HapticFeedback.heavyImpact();
+      _playBrowserSound(130.0, 0.5, 'sawtooth');
     }
   }
 
@@ -422,7 +454,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
       isTimeout = true;
       selectedOptionIndex = null;
     });
-    _blinkController.repeat(reverse: true); // بدء الوميض المتكرر فوراً
+    _blinkController.repeat(reverse: true);
   }
 
   Future<void> loadQuestionsFromAsset() async {
@@ -435,6 +467,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
         if (remainingQuestions.isNotEmpty) {
           currentQuestion = remainingQuestions.removeAt(0);
           currentQuestionIndex = 1;
+          _prepareQuestionOptions();
           startTimer();
         }
         isLoading = false;
@@ -446,21 +479,47 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
     }
   }
 
+  void _prepareQuestionOptions() {
+    if (currentQuestion == null) return;
+
+    List<dynamic> originalOptions =
+        currentQuestion!['options'] as List<dynamic>;
+
+    // الحل الذكي هنا: جلب نص الإجابة الحرفي مباشرة من حقل "answer" في ملفك لتفادي الـ null
+    String correctOptionText =
+        (currentQuestion!['answer'] ?? '').toString().trim();
+
+    shuffledOptions = originalOptions.map((e) => e.toString().trim()).toList();
+    shuffledOptions.shuffle();
+
+    // نحدد ترتيب الإجابة الصحيحة الجديد داخل الخيارات المخلوطة بدقة
+    correctedCorrectIndex = shuffledOptions.indexOf(correctOptionText);
+
+    // حماية إضافية في حال لم يجد النص (لتجنب انهيار التطبيق)
+    if (correctedCorrectIndex == -1) {
+      correctedCorrectIndex = 0;
+    }
+  }
+
   void checkAnswer(int index) {
-    if (hasAnswered) return;
-    _playClickSound();
+    if (hasAnswered || currentQuestion == null) return;
+
+    bool isCorrect = (index == correctedCorrectIndex);
+    _playSoundFeedback(isCorrect);
+
     setState(() {
       selectedOptionIndex = index;
       hasAnswered = true;
       _timer?.cancel();
     });
 
-    bool isCorrect = (index == currentQuestion!['correct']);
-    _playSoundFeedback(isCorrect);
+    if (!isCorrect) {
+      _blinkController.repeat(reverse: true);
+    }
   }
 
   void nextQuestion() {
-    _playClickSound();
+    _playBrowserSound(440.0, 0.05, 'sine');
     if (currentQuestionIndex >= widget.totalQuestions ||
         remainingQuestions.isEmpty) {
       _showRoundEndDialog();
@@ -470,14 +529,14 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
       if (remainingQuestions.isNotEmpty) {
         currentQuestion = remainingQuestions.removeAt(0);
         currentQuestionIndex++;
+        _prepareQuestionOptions();
         startTimer();
       }
     });
   }
 
-  // ميزة الـ Shuffle وإعادة الجولة السريعة من فوق
   void _shuffleAndRestartRound() {
-    _playClickSound();
+    _playBrowserSound(300.0, 0.2, 'sine');
     setState(() {
       isLoading = true;
       remainingQuestions = List.from(allQuestions)..shuffle();
@@ -487,13 +546,13 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
       if (remainingQuestions.isNotEmpty) {
         currentQuestion = remainingQuestions.removeAt(0);
         currentQuestionIndex = 1;
+        _prepareQuestionOptions();
         startTimer();
       }
       isLoading = false;
     });
   }
 
-  // ميزة تعديل اسم المتسابق حياً أثناء اللعب
   void _editPlayerName(int index) {
     TextEditingController nameEditController =
         TextEditingController(text: players[index].name);
@@ -535,7 +594,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
   }
 
   void _handleScoreIncrement(int playerIndex) {
-    _playSoundFeedback(true);
+    _playBrowserSound(587.33, 0.1, 'sine');
     setState(() {
       players[playerIndex].score++;
       winningPlayerIndex = playerIndex;
@@ -549,7 +608,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
 
   void _handleScoreDecrement(int playerIndex) {
     if (players[playerIndex].score > 0) {
-      _playSoundFeedback(false);
+      _playBrowserSound(220.0, 0.15, 'triangle');
       setState(() {
         players[playerIndex].score--;
       });
@@ -617,7 +676,6 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // كابينة التحكم العلوية مع زر إعادة التدوير والـ Shuffle
               Padding(
                 padding: const EdgeInsets.only(
                     left: 16.0, right: 16.0, top: 2.0, bottom: 2.0),
@@ -626,21 +684,20 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                   children: [
                     IconButton(
                       icon: const Icon(Icons.arrow_back_ios,
-                          color: Colors.white70, size: 20),
+                          color: Colors.white70, size: 18),
                       onPressed: widget.onReset,
                     ),
                     Row(
                       children: [
                         IconButton(
                           icon: const Icon(Icons.loop,
-                              color: Colors.cyanAccent, size: 24),
-                          tooltip: 'إعادة خلط الجولة',
+                              color: Colors.cyanAccent, size: 22),
                           onPressed: _shuffleAndRestartRound,
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 6),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 4),
+                              horizontal: 10, vertical: 3),
                           decoration: BoxDecoration(
                             color: const Color(0x33FFC107),
                             borderRadius: BorderRadius.circular(20),
@@ -651,7 +708,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                             style: const TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color: Colors.amber,
-                                fontSize: 13),
+                                fontSize: 12),
                           ),
                         ),
                       ],
@@ -659,120 +716,104 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                   ],
                 ),
               ),
-
-              // الرفع والضغط للأعلى لحسابات وواجهات الخانات المعدنية الدائرية
               Padding(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4.0),
+                    const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: List.generate(2, (index) {
                     final p = players[index];
                     bool isGlowing = (winningPlayerIndex == index);
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // كليك على اسم اللاعب لتعديله مباشرة حياً
-                        InkWell(
-                          onTap: () => _editPlayerName(index),
-                          borderRadius: BorderRadius.circular(8),
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6.0, vertical: 2.0),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  p.name,
-                                  style: const TextStyle(
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.amberAccent),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                const SizedBox(width: 3),
-                                const Icon(Icons.edit,
-                                    size: 12, color: Colors.white54),
-                              ],
+                    return GestureDetector(
+                      onTap: () => _handleScoreIncrement(index),
+                      onDoubleTap: () => _handleScoreDecrement(index),
+                      onLongPress: () => _editPlayerName(index),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 250),
+                        width: 105,
+                        height: 105,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [
+                              Colors.grey[200]!,
+                              Colors.grey[500]!,
+                              Colors.grey[800]!,
+                              Colors.grey[400]!,
+                            ],
+                            stops: const [0.1, 0.4, 0.6, 0.9],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: isGlowing
+                                  ? Colors.cyanAccent.withAlpha(229)
+                                  : Colors.black.withAlpha(178),
+                              offset: const Offset(2, 2),
+                              blurRadius: isGlowing ? 22 : 6,
                             ),
+                          ],
+                          border: Border.all(
+                            color: isGlowing
+                                ? Colors.cyanAccent
+                                : Colors.grey[300]!,
+                            width: isGlowing ? 3.0 : 1.5,
                           ),
                         ),
-                        const SizedBox(height: 3),
-                        GestureDetector(
-                          onTap: () => _handleScoreIncrement(index),
-                          onDoubleTap: () => _handleScoreDecrement(index),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 250),
-                            width: 95,
-                            height: 95,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  Colors.grey[300]!,
-                                  Colors.grey[500]!,
-                                  Colors.grey[700]!,
-                                  Colors.grey[400]!,
-                                ],
-                                stops: const [0.1, 0.4, 0.6, 0.9],
-                              ),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: isGlowing
-                                      ? Colors.cyanAccent.withAlpha(229)
-                                      : Colors.black.withAlpha(153),
-                                  offset: const Offset(3, 3),
-                                  blurRadius: isGlowing ? 25 : 6,
-                                  spreadRadius: isGlowing ? 5 : 1,
-                                ),
-                              ],
-                              border: Border.all(
-                                  color: isGlowing
-                                      ? Colors.cyanAccent
-                                      : Colors.grey[400]!,
-                                  width: isGlowing ? 2.5 : 1),
-                            ),
-                            child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8.0),
                               child: Text(
-                                '${p.score}',
+                                p.name,
                                 style: const TextStyle(
-                                  fontSize: 34,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                  color: Color(0xFF1A237E),
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${p.score}',
+                              style: const TextStyle(
+                                  fontSize: 32,
                                   fontWeight: FontWeight.bold,
                                   color: Color(0xFF0D47A1),
                                   fontFamily: 'monospace',
+                                  height: 1.1,
                                   shadows: [
                                     Shadow(
-                                      offset: Offset(2.0, 2.0),
-                                      blurRadius: 3.0,
-                                      color: Colors.white70,
-                                    ),
-                                  ],
-                                ),
-                              ),
+                                        offset: Offset(1.0, 1.0),
+                                        blurRadius: 2.0,
+                                        color: Colors.white),
+                                  ]),
                             ),
-                          ),
+                          ],
                         ),
-                      ],
+                      ),
                     );
                   }),
                 ),
               ),
-
               Center(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2.0),
+                  padding: const EdgeInsets.symmetric(vertical: 4.0),
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: 44,
-                        height: 44,
+                        width: 40,
+                        height: 40,
                         child: CircularProgressIndicator(
                           value: _timerSeconds / widget.questionTime,
-                          strokeWidth: 4,
+                          strokeWidth: 3.5,
                           backgroundColor: const Color(0x22FFFFFF),
                           color: _timerSeconds <= 5
                               ? Colors.red
@@ -782,7 +823,7 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                       Text(
                         '$_timerSeconds',
                         style: TextStyle(
-                            fontSize: 15,
+                            fontSize: 14,
                             fontWeight: FontWeight.bold,
                             color:
                                 _timerSeconds <= 5 ? Colors.red : Colors.white),
@@ -791,8 +832,6 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                   ),
                 ),
               ),
-
-              // سحب خانة السؤال للأعلى لترك مساحة سفلية ضخمة للخيارات
               Expanded(
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
@@ -819,80 +858,68 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                             textAlign: TextAlign.center,
                           ),
                         ),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
                         Expanded(
                           child: ListView.builder(
                             shrinkWrap: true,
                             physics: const NeverScrollableScrollPhysics(),
-                            itemCount:
-                                (currentQuestion!['options'] as List<dynamic>)
-                                    .length,
+                            itemCount: shuffledOptions.length,
                             itemBuilder: (context, idx) {
-                              String optionText =
-                                  currentQuestion!['options'][idx].toString();
+                              String optionText = shuffledOptions[idx];
 
                               Color buttonBorderColor = const Color(0x22FFFFFF);
                               Color? buttonBgColor = const Color(0x1AFFFFFF);
                               bool shouldBlink = false;
 
                               if (hasAnswered) {
-                                if (idx == currentQuestion!['correct']) {
+                                if (idx == correctedCorrectIndex) {
                                   buttonBorderColor = Colors.greenAccent;
-                                  buttonBgColor =
-                                      Colors.green[900]?.withAlpha(150);
-                                  if (isTimeout) {
-                                    shouldBlink =
-                                        true; // تفعيل لقطة الوميض للإجابة الصحيحة عند الصفر
+                                  buttonBgColor = const Color(0xFF1B5E20);
+
+                                  if (isTimeout ||
+                                      selectedOptionIndex !=
+                                          correctedCorrectIndex) {
+                                    shouldBlink = true;
                                   }
                                 } else if (idx == selectedOptionIndex) {
                                   buttonBorderColor = Colors.redAccent;
-                                  buttonBgColor =
-                                      Colors.red[900]?.withAlpha(150);
+                                  buttonBgColor = const Color(0xFFB71C1C);
                                 }
                               }
 
                               Widget buttonChild = ElevatedButton(
+                                key: ValueKey(
+                                    'opt_${currentQuestionIndex}_$idx'),
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: buttonBgColor,
                                   foregroundColor: Colors.white,
                                   padding:
                                       const EdgeInsets.symmetric(vertical: 14),
                                   shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
+                                      borderRadius: BorderRadius.circular(12)),
                                   side: BorderSide(
                                       color: buttonBorderColor,
-                                      width: hasAnswered ? 2.5 : 1.2),
-                                  elevation: hasAnswered &&
-                                          (idx == currentQuestion!['correct'] ||
-                                              idx == selectedOptionIndex)
-                                      ? 6
-                                      : 0,
+                                      width: hasAnswered ? 4.5 : 1.2),
+                                  elevation: hasAnswered ? 10 : 0,
                                 ),
-                                onPressed: () => checkAnswer(idx),
+                                onPressed:
+                                    hasAnswered ? null : () => checkAnswer(idx),
                                 child: Text(
                                   optionText,
                                   style: const TextStyle(
                                       fontSize: 16,
-                                      fontWeight: FontWeight.w600),
+                                      fontWeight: FontWeight.bold),
                                   textAlign: TextAlign.center,
                                 ),
                               );
 
-                              // تطبيق تأثير الانيميشن الخاص بالوميض (Opacity Blinking)
                               return Padding(
                                 padding:
-                                    const EdgeInsets.symmetric(vertical: 4.0),
+                                    const EdgeInsets.symmetric(vertical: 5.0),
                                 child: shouldBlink
-                                    ? AnimatedBuilder(
-                                        animation: _blinkAnimation,
-                                        builder: (context, child) {
-                                          return Opacity(
-                                            opacity: _blinkAnimation.value,
-                                            child: buttonChild,
-                                          );
-                                        },
-                                      )
+                                    ? FadeTransition(
+                                        opacity: _blinkAnimation,
+                                        child: buttonChild)
                                     : buttonChild,
                               );
                             },
@@ -903,23 +930,33 @@ class _QuizScreenState extends State<QuizScreen> with TickerProviderStateMixin {
                   ),
                 ),
               ),
-
               Padding(
-                padding: const EdgeInsets.only(
-                    left: 20.0, right: 20.0, bottom: 10.0, top: 2.0),
-                child: ElevatedButton.icon(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 20.0, vertical: 10.0),
+                child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.blueAccent[700],
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    backgroundColor:
+                        hasAnswered ? Colors.amber : Colors.grey[800],
+                    foregroundColor:
+                        hasAnswered ? Colors.black : Colors.white38,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12)),
+                    elevation: hasAnswered ? 5 : 0,
                   ),
-                  onPressed: nextQuestion,
-                  icon: const Icon(Icons.skip_next, size: 22),
-                  label: const Text('السؤال التالي ➡️',
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  onPressed: hasAnswered ? nextQuestion : null,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        currentQuestionIndex >= widget.totalQuestions
+                            ? '🏁 إنهاء التحدي ورؤية النتيجة'
+                            : 'السؤال التالي ➡️',
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
